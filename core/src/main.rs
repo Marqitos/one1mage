@@ -1,4 +1,7 @@
 mod database;
+mod folder_listing;
+mod renderer;
+mod window;
 
 use sha2::{Digest, Sha256};
 use std::{
@@ -233,6 +236,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let database = database::ImageDatabase::open(&storage_paths.database_file)?;
     let info = resolve_image_info(&database, &path, file)?;
+    let folder_images =
+        folder_listing::list_supported_images(&info.file.folder, &info.file.database_name)?;
     let thumbnail_path = storage_paths.thumbnail_path(&info.hash)?;
     std::fs::create_dir_all(
         thumbnail_path
@@ -249,6 +254,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("Base de datos: {:?}", storage_paths.database_file);
     println!("Caché: {:?}", storage_paths.cache_dir);
     println!("Ruta de miniatura: {:?}", thumbnail_path);
+    println!("Archivos de la carpeta:");
+    println!(
+        "Orden: {}",
+        if folder_images.used_explorer_order {
+            "vista abierta del Explorador"
+        } else {
+            "nombre natural (fallback; no se encontró la vista)"
+        }
+    );
+    for image in folder_images.images {
+        let marker = if image.selected { ">" } else { " " };
+        println!("{marker} {}", image.name.to_string_lossy());
+    }
+    window::show(&path, &info.file.file_name.to_string_lossy())?;
 
     Ok(())
 }
