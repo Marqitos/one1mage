@@ -13,3 +13,6 @@ image = { version = "0.25", default-features = false, features = [
     "bmp",
     "tiff",
 ] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v5"] }
