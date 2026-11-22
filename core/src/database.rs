@@ -1,4 +1,4 @@
-use crate::{FileInfo, ImageInfo};
+use crate::{FileInfo, ImageInfo, SHA256};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::Path;
 use uuid::Uuid;
@@ -26,8 +26,8 @@ CREATE INDEX IF NOT EXISTS idx_image_files_image_id ON image_files(image_id);
 ";
 const CURRENT_SCHEMA_VERSION: i64 = 2;
 
-fn image_id_from_hash(hash: &str) -> String {
-    let name = format!("one1mage:sha256:{hash}");
+fn image_id_from_hash(hash: &SHA256) -> String {
+    let name = format!("1mage:sha256:{hash}");
     Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes()).to_string()
 }
 
@@ -77,7 +77,7 @@ impl ImageDatabase {
                 |row| {
                     Ok(ImageInfo {
                         file: file.clone(),
-                        hash: row.get(0)?,
+                        hash: SHA256::new(row.get(0)?).unwrap(),
                         width: row.get(1)?,
                         height: row.get(2)?,
                         mime_type: row.get(3)?,
@@ -90,22 +90,22 @@ impl ImageDatabase {
     pub(super) fn find_by_hash(
         &self,
         file: &FileInfo,
-        hash: &str,
+        hash: &SHA256,
     ) -> rusqlite::Result<Option<ImageInfo>> {
         let file_size = sqlite_file_size(file.file_size)?;
         self.connection
             .query_row(
-                "SELECT hash, width, height, mime_type
+                "SELECT width, height, mime_type
                  FROM images
                  WHERE hash = ?1 AND file_size = ?2",
-                params![hash, file_size],
+                params![hash.value(), file_size],
                 |row| {
                     Ok(ImageInfo {
                         file: file.clone(),
-                        hash: row.get(0)?,
-                        width: row.get(1)?,
-                        height: row.get(2)?,
-                        mime_type: row.get(3)?,
+                        hash: hash.clone(),
+                        width: row.get(0)?,
+                        height: row.get(1)?,
+                        mime_type: row.get(2)?,
                     })
                 },
             )
@@ -129,7 +129,7 @@ impl ImageDatabase {
              ON CONFLICT(hash) DO NOTHING",
             params![
                 id,
-                image.hash,
+                image.hash.value(),
                 file_size,
                 i64::from(image.width),
                 i64::from(image.height),
@@ -196,7 +196,7 @@ mod tests {
         }
     }
 
-    fn sample_image(file: FileInfo, hash: &str) -> ImageInfo {
+    fn sample_image(file: FileInfo, hash: &SHA256) -> ImageInfo {
         ImageInfo {
             file,
             hash: hash.to_owned(),
@@ -299,7 +299,7 @@ mod tests {
         let temp_database = TemporaryDatabase::new();
         let database = ImageDatabase::open(&temp_database.0).unwrap();
         let file = sample_file(r"c:\images", "one.png");
-        let hash = "a".repeat(64);
+        let hash = SHA256::new("a".repeat(64)).unwrap();
         let image = sample_image(file.clone(), &hash);
         database.store_image_file(&image).unwrap();
 
@@ -315,7 +315,7 @@ mod tests {
     fn find_by_hash_requires_matching_size_and_links_a_new_path() {
         let temp_database = TemporaryDatabase::new();
         let database = ImageDatabase::open(&temp_database.0).unwrap();
-        let hash = "a".repeat(64);
+        let hash = SHA256::new("a".repeat(64)).unwrap();
         let original_file = sample_file(r"c:\images", "one.png");
         let original = sample_image(original_file, &hash);
         database.store_image_file(&original).unwrap();
@@ -347,7 +347,7 @@ mod tests {
     fn store_image_file_does_not_duplicate_hash_or_path() {
         let temp_database = TemporaryDatabase::new();
         let database = ImageDatabase::open(&temp_database.0).unwrap();
-        let hash = "a".repeat(64);
+        let hash = SHA256::new("a".repeat(64)).unwrap();
         let first = sample_image(sample_file(r"c:\images", "one.png"), &hash);
         let duplicate_path = sample_image(sample_file(r"c:\images", "one.png"), &hash);
         let duplicate_content = sample_image(sample_file(r"c:\copies", "copy.png"), &hash);

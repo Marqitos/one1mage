@@ -12,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
 };
+use std::fmt::Display;
 
 #[derive(Clone, Debug)]
 struct FileInfo {
@@ -26,15 +27,95 @@ struct FileInfo {
 #[derive(Clone, Debug)]
 struct ImageInfo {
     file: FileInfo,
-    hash: String,
+    hash: SHA256,
     width: u32,
     height: u32,
     mime_type: String,
 }
 
-struct AppStoragePaths {
-    database_file: PathBuf,
-    cache_dir: PathBuf,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SHA256(String);
+
+impl SHA256 {
+    pub fn new(hash: String) -> io::Result<Self> {
+        if hash.len() != 64
+            || !hash
+            .to_lowercase()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "el hash SHA-256 debe contener 64 caracteres hexadecimales minúsculos",
+            ));
+        }
+        Ok(SHA256(hash.to_lowercase()))
+    }
+    fn from_file(path: &Path) -> io::Result<Self> {
+        let mut file = File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 64 * 1024];
+
+        loop {
+            let bytes_read = file.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+
+        Ok(SHA256(format!("{:x}", hasher.finalize())))
+    }
+    pub fn value(&self) -> &str{
+        &self.0
+    }
+    pub fn first(&self) -> &str{
+        &self.0[..2]
+    }
+    pub fn last(&self) -> &str{
+        &self.0[2..]
+    }
+}
+
+impl Display for SHA256 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+const PART_PRODUCT_FOLDER: &str = "One1mage";
+const PART_CACHE_FOLDER: &str = "cache";
+const PART_DATABASE_FILE: &str = "1mage.sqlite3";
+pub struct Cache(PathBuf);
+
+impl Cache {
+    fn path(&self) ->PathBuf {
+        self.0.clone()
+    }
+    fn thumbnail_path(&self, hash: &SHA256) -> io::Result<PathBuf> {
+
+        Ok(self.0
+            .join(hash.first())
+            .join("thumb")
+            .join(hash.last()))
+        // TODO: Extensión de imágenes en cache
+    }
+}
+pub struct AppStoragePaths {
+    app_data_dir: PathBuf,
+}
+impl AppStoragePaths {
+    fn new(local_app_data: &Path) -> AppStoragePaths {
+        AppStoragePaths {
+            app_data_dir: local_app_data.join(PART_PRODUCT_FOLDER),
+        }
+    }
+    fn database_file(&self) -> PathBuf {
+        self.app_data_dir.join(PART_DATABASE_FILE)
+    }
+    fn cache(&self) -> Cache {
+        Cache(self.app_data_dir.join(PART_CACHE_FOLDER))
+    }
 }
 
 struct MimeType {
@@ -60,51 +141,6 @@ impl MimeType {
             },
         ]
     }
-}
-
-impl AppStoragePaths {
-    fn thumbnail_path(&self, hash: &str) -> io::Result<PathBuf> {
-        if hash.len() != 64
-            || !hash
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "el hash SHA-256 debe contener 64 caracteres hexadecimales minúsculos",
-            ));
-        }
-
-        Ok(self
-            .cache_dir
-            .join(&hash[..2])
-            .join("thumb")
-            .join(&hash[2..]))
-    }
-}
-
-fn app_storage_paths(local_app_data: &Path) -> AppStoragePaths {
-    let app_dir = local_app_data.join("One1mage");
-    AppStoragePaths {
-        database_file: app_dir.join("One1mage.sqlite3"),
-        cache_dir: app_dir.join("cache"),
-    }
-}
-
-fn sha256_file(path: &Path) -> io::Result<String> {
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 64 * 1024];
-
-    loop {
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn image_mime_type_for_extension(path: &Path) -> Option<String> {
@@ -176,7 +212,7 @@ fn inspect_file(path: &Path) -> io::Result<FileInfo> {
     })
 }
 
-fn read_image_info(path: &Path, file: FileInfo, hash: String) -> io::Result<ImageInfo> {
+fn read_image_info(path: &Path, file: FileInfo, hash: SHA256) -> io::Result<ImageInfo> {
     let reader = image::ImageReader::open(path)?.with_guessed_format()?;
     let actual_mime_type = match reader.format() {
         Some(image::ImageFormat::Jpeg) => "image/jpeg",
@@ -228,7 +264,7 @@ fn resolve_image_info(
         return Ok(image);
     }
 
-    let hash = sha256_file(path)?;
+    let hash = SHA256::from_file(path)?;
     if let Some(image) = database.find_by_hash(&file, &hash)? {
         validate_cached_mime(&file, &image.mime_type)?;
         database.add_file_location(&image)?;
@@ -254,18 +290,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .ok_or("no se encontró la carpeta local de datos de Windows (LOCALAPPDATA)")?;
-    let storage_paths = app_storage_paths(&local_app_data);
+    let storage_paths =  AppStoragePaths::new(&local_app_data);
     std::fs::create_dir_all(
         storage_paths
-            .database_file
+            .database_file()
             .parent()
             .ok_or("no se pudo determinar la carpeta de la base de datos")?,
     )?;
-    let database = database::ImageDatabase::open(&storage_paths.database_file)?;
+    let database = database::ImageDatabase::open(&storage_paths.database_file())?;
     let info = resolve_image_info(&database, &path, file)?;
     let folder_images =
         folder_listing::list_supported_images(&info.file.folder, &info.file.database_name)?;
-    let thumbnail_path = storage_paths.thumbnail_path(&info.hash)?;
+    let thumbnail_path = storage_paths.cache().thumbnail_path(&info.hash)?;
     std::fs::create_dir_all(
         thumbnail_path
             .parent()
@@ -275,11 +311,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("Carpeta: {:?}", info.file.folder);
     println!("Nombre del fichero: {:?}", info.file.file_name);
     println!("Tamaño: {} bytes", info.file.file_size);
-    println!("SHA-256: {}", info.hash);
+    println!("SHA-256: {}", &info.hash);
     println!("Dimensiones: {}x{}", info.width, info.height);
     println!("Tipo MIME: {}", info.mime_type);
-    println!("Base de datos: {:?}", storage_paths.database_file);
-    println!("Caché: {:?}", storage_paths.cache_dir);
+    println!("Base de datos: {:?}", storage_paths.database_file());
+    println!("Caché: {:?}", storage_paths.cache().path());
     println!("Ruta de miniatura: {:?}", thumbnail_path);
     println!("Archivos de la carpeta:");
     println!(
@@ -467,7 +503,7 @@ mod tests {
         let path = TemporaryFile::with_format("jpg", ImageFormat::Png);
         let file = inspect_file(&path.0).unwrap();
 
-        let error = read_image_info(&path.0, file, "a".repeat(64)).unwrap_err();
+        let error = read_image_info(&path.0, file, SHA256::new("a".repeat(64)).unwrap()).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
@@ -476,7 +512,7 @@ mod tests {
     fn read_image_info_returns_hash_dimensions_and_detected_mime() {
         let path = TemporaryFile::new("png");
         let file = inspect_file(&path.0).unwrap();
-        let hash = sha256_file(&path.0).unwrap();
+        let hash = SHA256::from_file(&path.0).unwrap();
 
         let info = read_image_info(&path.0, file, hash.clone()).unwrap();
 
@@ -492,7 +528,7 @@ mod tests {
         let file = inspect_file(&path.0).unwrap();
         let cached = ImageInfo {
             file: file.clone(),
-            hash: "c".repeat(64),
+            hash: SHA256::new("c".repeat(64)).unwrap(),
             width: 7,
             height: 9,
             mime_type: "image/png".to_owned(),
@@ -533,14 +569,14 @@ mod tests {
 
     #[test]
     fn app_storage_paths_use_a_per_user_local_directory() {
-        let paths = app_storage_paths(Path::new(r"C:\Users\test\AppData\Local"));
+        let paths = AppStoragePaths::new(Path::new(r"C:\Users\test\AppData\Local"));
 
         assert_eq!(
-            paths.database_file,
-            Path::new(r"C:\Users\test\AppData\Local\One1mage\One1mage.sqlite3")
+            paths.database_file(),
+            Path::new(r"C:\Users\test\AppData\Local\One1mage\1mage.sqlite3")
         );
         assert_eq!(
-            paths.cache_dir,
+            paths.cache().path(),
             Path::new(r"C:\Users\test\AppData\Local\One1mage\cache")
         );
     }
@@ -576,11 +612,11 @@ mod tests {
 
     #[test]
     fn thumbnail_cache_path_uses_hash_sharding() {
-        let paths = app_storage_paths(Path::new(r"C:\Users\test\AppData\Local"));
-        let hash = "ab".to_owned() + &"c".repeat(62);
+        let paths = AppStoragePaths::new(Path::new(r"C:\Users\test\AppData\Local"));
+        let hash = SHA256::new("ab".to_owned() + &"c".repeat(62)).unwrap();
 
         assert_eq!(
-            paths.thumbnail_path(&hash).unwrap(),
+            paths.cache().thumbnail_path(&hash).unwrap(),
             Path::new(r"C:\Users\test\AppData\Local\One1mage\cache\ab\thumb").join("c".repeat(62))
         );
     }
