@@ -20,7 +20,7 @@ struct FileInfo {
     database_folder: String,
     database_name: String,
     file_size: u64,
-    expected_mime_type: &'static str,
+    expected_mime_type: String,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +35,31 @@ struct ImageInfo {
 struct AppStoragePaths {
     database_file: PathBuf,
     cache_dir: PathBuf,
+}
+
+struct MimeType {
+    extensions: Vec<String>,
+    mime_type: String
+}
+
+impl MimeType {
+    fn supported() -> Vec<MimeType> {
+        vec![
+            MimeType {
+                extensions:  vec![
+                    "jpg".to_string(),
+                    "jpeg".to_string(),
+                    "jpe".to_string(),
+                    "jfif".to_string()],
+                mime_type: "image/jpeg".to_string()
+            },
+            MimeType {
+                extensions:  vec![
+                    "png".to_string()],
+                mime_type: "image/png".to_string()
+            },
+        ]
+    }
 }
 
 impl AppStoragePaths {
@@ -82,18 +107,20 @@ fn sha256_file(path: &Path) -> io::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn image_mime_type_for_extension(path: &Path) -> Option<&'static str> {
-    let extension = path.extension().and_then(OsStr::to_str)?;
-    if ["jpg", "jpeg", "jpe", "jfif"]
-        .iter()
-        .any(|supported| extension.eq_ignore_ascii_case(supported))
-    {
-        Some("image/jpeg")
-    } else if extension.eq_ignore_ascii_case("png") {
-        Some("image/png")
-    } else {
-        None
+fn image_mime_type_for_extension(path: &Path) -> Option<String> {
+    let option_extension = path.extension()
+        .and_then(OsStr::to_str);
+    if let Some(extension) = option_extension {
+        for mime in MimeType::supported() {
+            if mime.extensions
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported)) {
+
+                return Some(mime.mime_type);
+            }
+        }
     }
+    None
 }
 
 fn inspect_file(path: &Path) -> io::Result<FileInfo> {
@@ -369,13 +396,13 @@ mod tests {
     #[test]
     fn image_extensions_return_their_mime_type() {
         for (extension, expected_mime_type) in [
-            ("jpg", "image/jpeg"),
-            ("jpeg", "image/jpeg"),
-            ("jpe", "image/jpeg"),
-            ("jfif", "image/jpeg"),
-            ("png", "image/png"),
-            ("JpG", "image/jpeg"),
-            ("PnG", "image/png"),
+            ("jpg", "image/jpeg".to_string()),
+            ("jpeg", "image/jpeg".to_string()),
+            ("jpe", "image/jpeg".to_string()),
+            ("jfif", "image/jpeg".to_string()),
+            ("png", "image/png".to_string()),
+            ("JpG", "image/jpeg".to_string()),
+            ("PnG", "image/png".to_string()),
         ] {
             let path = PathBuf::from(format!("image.{extension}"));
 

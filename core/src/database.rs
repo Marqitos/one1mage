@@ -192,7 +192,7 @@ mod tests {
             database_folder: folder.to_owned(),
             database_name: name.to_owned(),
             file_size: 4,
-            expected_mime_type: "image/png",
+            expected_mime_type: "image/png".to_string(),
         }
     }
 
