@@ -11,15 +11,16 @@ CREATE TABLE IF NOT EXISTS images (
     file_size INTEGER NOT NULL CHECK(file_size >= 0),
     width INTEGER NOT NULL CHECK(width > 0),
     height INTEGER NOT NULL CHECK(height > 0),
-    mime_type TEXT NOT NULL CHECK(mime_type IN ('image/jpeg', 'image/png'))
+    mime_type TEXT NOT NULL
 );
 ";
 const IMAGE_FILES_TABLE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS image_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     folder TEXT NOT NULL,
     name TEXT NOT NULL,
     image_id TEXT NOT NULL,
-    PRIMARY KEY (folder, name),
+    UNIQUE(folder, name),
     FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_image_files_image_id ON image_files(image_id);
@@ -352,6 +353,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(image_rows, 1);
-        assert_eq!(file_rows, 2);
+        assert_eq!(file_rows, 1);
     }
 }
