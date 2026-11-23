@@ -66,14 +66,14 @@ impl ImageDatabase {
     }
 
     pub(super) fn find_by_path(&self, file: &FileInfo) -> rusqlite::Result<Option<ImageInfo>> {
-        let file_size = sqlite_file_size(file.file_size)?;
+        let file_size = sqlite_file_size(file.file_size())?;
         self.connection
             .query_row(
                 "SELECT i.hash, i.width, i.height, i.mime_type
                  FROM image_files AS f
                  JOIN images AS i ON i.id = f.image_id
                  WHERE f.folder = ?1 AND f.name = ?2 AND i.file_size = ?3",
-                params![file.database_folder, file.database_name, file_size],
+                params![file.folder().canonical_name(), file.canonical_name(), file_size],
                 |row| {
                     Ok(ImageInfo {
                         file: file.clone(),
@@ -92,7 +92,7 @@ impl ImageDatabase {
         file: &FileInfo,
         hash: &SHA256,
     ) -> rusqlite::Result<Option<ImageInfo>> {
-        let file_size = sqlite_file_size(file.file_size)?;
+        let file_size = sqlite_file_size(file.file_size())?;
         self.connection
             .query_row(
                 "SELECT width, height, mime_type
@@ -119,7 +119,7 @@ impl ImageDatabase {
     }
 
     pub(super) fn store_image_file(&self, image: &ImageInfo) -> rusqlite::Result<()> {
-        let file_size = sqlite_file_size(image.file.file_size)?;
+        let file_size = sqlite_file_size(image.file.file_size())?;
         let id = image_id_from_hash(&image.hash);
         let transaction = self.connection.unchecked_transaction()?;
 
@@ -149,7 +149,7 @@ impl ImageDatabase {
             "INSERT INTO image_files (folder, name, image_id)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(folder, name) DO UPDATE SET image_id = excluded.image_id",
-            params![image.file.database_folder, image.file.database_name, id],
+            params![image.file.folder().canonical_name(), image.file.canonical_name(), id],
         )?;
 
         Ok(())
@@ -160,7 +160,6 @@ impl ImageDatabase {
 mod tests {
     use super::*;
     use std::{
-        ffi::OsString,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -182,17 +181,6 @@ mod tests {
     impl Drop for TemporaryDatabase {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    fn sample_file(folder: &str, name: &str) -> FileInfo {
-        FileInfo {
-            folder: PathBuf::from(folder),
-            file_name: OsString::from(name),
-            database_folder: folder.to_owned(),
-            database_name: name.to_owned(),
-            file_size: 4,
-            expected_mime_type: "image/png".to_string(),
         }
     }
 
@@ -298,14 +286,13 @@ mod tests {
     fn find_by_path_requires_matching_path_and_file_size() {
         let temp_database = TemporaryDatabase::new();
         let database = ImageDatabase::open(&temp_database.0).unwrap();
-        let file = sample_file(r"c:\images", "one.png");
+        let file = FileInfo::sample_file(r"c:\images", "one.png");
         let hash = SHA256::new("a".repeat(64)).unwrap();
         let image = sample_image(file.clone(), &hash);
         database.store_image_file(&image).unwrap();
 
         let found = database.find_by_path(&file).unwrap().unwrap();
-        let mut changed_size = file;
-        changed_size.file_size += 1;
+        let changed_size = file.with_file_size(file.file_size() + 1);
 
         assert_eq!(found.hash, hash);
         assert!(database.find_by_path(&changed_size).unwrap().is_none());
@@ -316,19 +303,18 @@ mod tests {
         let temp_database = TemporaryDatabase::new();
         let database = ImageDatabase::open(&temp_database.0).unwrap();
         let hash = SHA256::new("a".repeat(64)).unwrap();
-        let original_file = sample_file(r"c:\images", "one.png");
+        let original_file = FileInfo::sample_file(r"c:\images", "one.png");
         let original = sample_image(original_file, &hash);
         database.store_image_file(&original).unwrap();
 
-        let duplicate_file = sample_file(r"c:\copies", "copy.png");
+        let duplicate_file = FileInfo::sample_file(r"c:\copies", "copy.png");
         let found = database
             .find_by_hash(&duplicate_file, &hash)
             .unwrap()
             .unwrap();
         database.add_file_location(&found).unwrap();
 
-        let mut wrong_size = duplicate_file.clone();
-        wrong_size.file_size += 1;
+        let wrong_size = duplicate_file.with_file_size(duplicate_file.file_size() + 1);
         assert!(database.find_by_hash(&wrong_size, &hash).unwrap().is_none());
         assert!(database.find_by_path(&duplicate_file).unwrap().is_some());
 
@@ -348,9 +334,9 @@ mod tests {
         let temp_database = TemporaryDatabase::new();
         let database = ImageDatabase::open(&temp_database.0).unwrap();
         let hash = SHA256::new("a".repeat(64)).unwrap();
-        let first = sample_image(sample_file(r"c:\images", "one.png"), &hash);
-        let duplicate_path = sample_image(sample_file(r"c:\images", "one.png"), &hash);
-        let duplicate_content = sample_image(sample_file(r"c:\copies", "copy.png"), &hash);
+        let first = sample_image(FileInfo::sample_file(r"c:\images", "one.png"), &hash);
+        let duplicate_path = sample_image(FileInfo::sample_file(r"c:\images", "one.png"), &hash);
+        let duplicate_content = sample_image(FileInfo::sample_file(r"c:\images", "one.png"), &hash);
 
         database.store_image_file(&first).unwrap();
         database.store_image_file(&duplicate_path).unwrap();

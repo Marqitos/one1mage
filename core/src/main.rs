@@ -1,28 +1,21 @@
 mod database;
-mod folder_listing;
+mod files;
+mod mime_type;
 mod renderer;
 mod window;
 
+use files::FileInfo;
 use sha2::{Digest, Sha256};
 use std::{
     env,
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     fs::File,
     io::{self, Read},
     path::{Path, PathBuf},
     process::ExitCode,
 };
 use std::fmt::Display;
-
-#[derive(Clone, Debug)]
-struct FileInfo {
-    folder: PathBuf,
-    file_name: OsString,
-    database_folder: String,
-    database_name: String,
-    file_size: u64,
-    expected_mime_type: String,
-}
+use crate::files::FolderListing;
 
 #[derive(Clone, Debug)]
 struct ImageInfo {
@@ -118,100 +111,6 @@ impl AppStoragePaths {
     }
 }
 
-struct MimeType {
-    extensions: Vec<String>,
-    mime_type: String
-}
-
-impl MimeType {
-    fn supported() -> Vec<MimeType> {
-        vec![
-            MimeType {
-                extensions:  vec![
-                    "jpg".to_string(),
-                    "jpeg".to_string(),
-                    "jpe".to_string(),
-                    "jfif".to_string()],
-                mime_type: "image/jpeg".to_string()
-            },
-            MimeType {
-                extensions:  vec![
-                    "png".to_string()],
-                mime_type: "image/png".to_string()
-            },
-        ]
-    }
-}
-
-fn image_mime_type_for_extension(path: &Path) -> Option<String> {
-    let option_extension = path.extension()
-        .and_then(OsStr::to_str);
-    if let Some(extension) = option_extension {
-        for mime in MimeType::supported() {
-            if mime.extensions
-                .iter()
-                .any(|supported| extension.eq_ignore_ascii_case(supported)) {
-
-                return Some(mime.mime_type);
-            }
-        }
-    }
-    None
-}
-
-fn inspect_file(path: &Path) -> io::Result<FileInfo> {
-    let metadata = std::fs::metadata(path)?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "la ruta no apunta a un archivo",
-        ));
-    }
-    let expected_mime_type = image_mime_type_for_extension(path).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "archivo no compatible: se admiten .jpg, .jpeg, .jpe, .jfif y .png",
-        )
-    })?;
-    let canonical_path = std::fs::canonicalize(path)?;
-
-    let folder = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "falta el nombre del archivo"))?
-        .to_os_string();
-    let database_folder = canonical_path
-        .parent()
-        .and_then(Path::to_str)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "la carpeta no tiene una ruta Unicode",
-            )
-        })?
-        .to_lowercase();
-    let database_name = canonical_path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "el nombre no es Unicode válido")
-        })?
-        .to_lowercase();
-
-    Ok(FileInfo {
-        folder,
-        file_name,
-        database_folder,
-        database_name,
-        file_size: metadata.len(),
-        expected_mime_type,
-    })
-}
-
 fn read_image_info(path: &Path, file: FileInfo, hash: SHA256) -> io::Result<ImageInfo> {
     let reader = image::ImageReader::open(path)?.with_guessed_format()?;
     let actual_mime_type = match reader.format() {
@@ -224,7 +123,7 @@ fn read_image_info(path: &Path, file: FileInfo, hash: SHA256) -> io::Result<Imag
             ));
         }
     };
-    if actual_mime_type != file.expected_mime_type {
+    if actual_mime_type != file.expected_mime_type() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "el formato del contenido no coincide con la extensión del archivo",
@@ -244,7 +143,7 @@ fn read_image_info(path: &Path, file: FileInfo, hash: SHA256) -> io::Result<Imag
 }
 
 fn validate_cached_mime(file: &FileInfo, mime_type: &str) -> io::Result<()> {
-    if mime_type == file.expected_mime_type {
+    if mime_type == file.expected_mime_type() {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -284,7 +183,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let path = PathBuf::from(image_path);
-    let file = inspect_file(&path)
+    let file = FileInfo::from_path(&path)
         .map_err(|error| format!("no se pudo inspeccionar '{}': {error}", path.display()))?;
     let local_app_data = env::var_os("LOCALAPPDATA")
         .filter(|path| !path.is_empty())
@@ -299,8 +198,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let database = database::ImageDatabase::open(&storage_paths.database_file())?;
     let info = resolve_image_info(&database, &path, file)?;
-    let folder_images =
-        folder_listing::list_supported_images(&info.file.folder, &info.file.database_name)?;
+    let folder_images = FolderListing::from_file_info(&info.file)?;
     let thumbnail_path = storage_paths.cache().thumbnail_path(&info.hash)?;
     std::fs::create_dir_all(
         thumbnail_path
@@ -308,9 +206,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("no se pudo determinar la carpeta de la miniatura")?,
     )?;
     println!("Ruta: {:?}", path);
-    println!("Carpeta: {:?}", info.file.folder);
-    println!("Nombre del fichero: {:?}", info.file.file_name);
-    println!("Tamaño: {} bytes", info.file.file_size);
+    println!("Carpeta: {:?}", info.file.folder());
+    println!("Nombre del fichero: {:?}", info.file.name());
+    println!("Tamaño: {} bytes", info.file.file_size());
     println!("SHA-256: {}", &info.hash);
     println!("Dimensiones: {}x{}", info.width, info.height);
     println!("Tipo MIME: {}", info.mime_type);
@@ -320,17 +218,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("Archivos de la carpeta:");
     println!(
         "Orden: {}",
-        if folder_images.used_explorer_order {
+        if folder_images.used_explorer_order() {
             "vista abierta del Explorador"
         } else {
             "nombre natural (fallback; no se encontró la vista)"
         }
     );
-    for image in folder_images.images {
-        let marker = if image.selected { ">" } else { " " };
-        println!("{marker} {}", image.name.to_string_lossy());
+    for (index, file) in folder_images.files().enumerate() {
+        let marker = if let Some(current_index) = folder_images.current_index() &&
+            index == *current_index { ">" } else { " " };
+        println!("{marker} {}", file.name().to_string_lossy());
     }
-    window::show(&path, &info.file.file_name.to_string_lossy())?;
+    window::show(&path, &info.file.name().to_string_lossy())?;
 
     Ok(())
 }
@@ -416,58 +315,17 @@ mod tests {
     }
 
     #[test]
-    fn supported_image_extensions_are_case_insensitive() {
-        for extension in [
-            "jpg", "jpeg", "jpe", "jfif", "png", "JPG", "JPEG", "JPE", "JFIF", "PNG", "Jpeg",
-        ] {
-            let path = PathBuf::from(format!("image.{extension}"));
-
-            assert!(
-                image_mime_type_for_extension(&path).is_some(),
-                "expected .{extension} to be supported"
-            );
-        }
-    }
-
-    #[test]
-    fn image_extensions_return_their_mime_type() {
-        for (extension, expected_mime_type) in [
-            ("jpg", "image/jpeg".to_string()),
-            ("jpeg", "image/jpeg".to_string()),
-            ("jpe", "image/jpeg".to_string()),
-            ("jfif", "image/jpeg".to_string()),
-            ("png", "image/png".to_string()),
-            ("JpG", "image/jpeg".to_string()),
-            ("PnG", "image/png".to_string()),
-        ] {
-            let path = PathBuf::from(format!("image.{extension}"));
-
-            assert_eq!(
-                image_mime_type_for_extension(&path),
-                Some(expected_mime_type)
-            );
-        }
-    }
-
-    #[test]
-    fn unsupported_image_extensions_are_rejected() {
-        for path in [Path::new("image.gif"), Path::new("image")] {
-            assert_eq!(image_mime_type_for_extension(path), None);
-        }
-    }
-
-    #[test]
     fn inspect_file_returns_path_and_file_metadata_without_hashing() {
         let path = TemporaryFile::new("png");
         let expected_size = std::fs::metadata(&path.0).unwrap().len();
 
-        let info = inspect_file(&path.0).unwrap();
+        let info = FileInfo::from_path(&path.0).unwrap();
 
-        assert_eq!(info.folder, env::temp_dir());
-        assert_eq!(info.file_name, path.0.file_name().unwrap());
+        assert_eq!(info.folder().path(), env::temp_dir());
+        assert_eq!(info.name(), path.0.file_name().unwrap());
         let canonical_path = std::fs::canonicalize(&path.0).unwrap();
         assert_eq!(
-            info.database_folder,
+            info.folder().canonical_name(),
             canonical_path
                 .parent()
                 .unwrap()
@@ -476,7 +334,7 @@ mod tests {
                 .to_lowercase()
         );
         assert_eq!(
-            info.database_name,
+            info.canonical_name(),
             canonical_path
                 .file_name()
                 .unwrap()
@@ -484,8 +342,8 @@ mod tests {
                 .unwrap()
                 .to_lowercase()
         );
-        assert_eq!(info.file_size, expected_size);
-        assert_eq!(info.expected_mime_type, "image/png");
+        assert_eq!(info.file_size(), expected_size);
+        assert_eq!(info.expected_mime_type(), "image/png");
     }
 
     #[test]
@@ -493,15 +351,15 @@ mod tests {
         let contents = b"not actually a png";
         let path = TemporaryFile::with_bytes("png", contents);
 
-        let file_info = inspect_file(&path.0).unwrap();
+        let file_info = FileInfo::from_path(&path.0).unwrap();
 
-        assert_eq!(file_info.file_size, contents.len() as u64);
+        assert_eq!(file_info.file_size(), contents.len() as u64);
     }
 
     #[test]
     fn read_image_info_rejects_content_that_does_not_match_extension() {
         let path = TemporaryFile::with_format("jpg", ImageFormat::Png);
-        let file = inspect_file(&path.0).unwrap();
+        let file = FileInfo::from_path(&path.0).unwrap();
 
         let error = read_image_info(&path.0, file, SHA256::new("a".repeat(64)).unwrap()).unwrap_err();
 
@@ -511,7 +369,7 @@ mod tests {
     #[test]
     fn read_image_info_returns_hash_dimensions_and_detected_mime() {
         let path = TemporaryFile::new("png");
-        let file = inspect_file(&path.0).unwrap();
+        let file = FileInfo::from_path(&path.0).unwrap();
         let hash = SHA256::from_file(&path.0).unwrap();
 
         let info = read_image_info(&path.0, file, hash.clone()).unwrap();
@@ -525,7 +383,7 @@ mod tests {
     fn resolve_image_info_uses_the_path_and_size_cache_before_reading_contents() {
         let contents = b"changed but same-sized invalid image";
         let path = TemporaryFile::with_bytes("png", contents);
-        let file = inspect_file(&path.0).unwrap();
+        let file = FileInfo::from_path(&path.0).unwrap();
         let cached = ImageInfo {
             file: file.clone(),
             hash: SHA256::new("c".repeat(64)).unwrap(),
@@ -552,9 +410,9 @@ mod tests {
         let database = database::ImageDatabase::open(&database_path.0).unwrap();
 
         let original_info =
-            resolve_image_info(&database, &original.0, inspect_file(&original.0).unwrap()).unwrap();
+            resolve_image_info(&database, &original.0, FileInfo::from_path(&original.0).unwrap()).unwrap();
         let duplicate_info =
-            resolve_image_info(&database, &duplicate.0, inspect_file(&duplicate.0).unwrap())
+            resolve_image_info(&database, &duplicate.0, FileInfo::from_path(&duplicate.0).unwrap())
                 .unwrap();
 
         assert_eq!(duplicate_info.hash, original_info.hash);
@@ -585,7 +443,7 @@ mod tests {
     fn inspect_file_rejects_an_unsupported_extension() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
 
-        let error = inspect_file(&path).unwrap_err();
+        let error = FileInfo::from_path(&path).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("archivo no compatible"));
@@ -595,7 +453,7 @@ mod tests {
     fn inspect_file_rejects_a_directory() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-        let error = inspect_file(path).unwrap_err();
+        let error = FileInfo::from_path(path).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
@@ -605,7 +463,7 @@ mod tests {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("this-file-does-not-exist-one1mage-test");
 
-        let error = inspect_file(&path).unwrap_err();
+        let error = FileInfo::from_path(&path).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
