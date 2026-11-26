@@ -51,9 +51,8 @@ impl AppWindow {
         let (width, height) = client_size(hwnd)?;
         self.dpi = unsafe { GetDpiForWindow(hwnd) }.max(1);
         if width > 0
-            && height > 0
-            && let Some(renderer) = self.renderer.as_mut()
-        {
+           && height > 0
+           && let Some(renderer) = self.renderer.as_mut() {
             renderer.resize(width, height, self.dpi, self.close_button_hovered)?;
         }
         if self.visible {

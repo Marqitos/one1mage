@@ -94,6 +94,7 @@ impl Cache {
         // TODO: Extensión de imágenes en cache
     }
 }
+
 pub struct AppStoragePaths {
     app_data_dir: PathBuf,
 }
