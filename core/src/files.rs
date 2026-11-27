@@ -1,78 +1,77 @@
+//! Manejo de archivos y carpetas de imagen.
+//! 
+//! Este módulo proporciona las estructuras principales para trabajar con archivos
+//! de imagen en el sistema de archivos:
+//! 
+//! - [`FolderInfo`]: Información sobre una carpeta (ruta, nombre canónico).
+//! - [`FileInfo`]: Información sobre un archivo de imagen (metadatos, tipo MIME, carpeta).
+//! - [`FolderListing`]: Listado de imágenes en una carpeta con orden opcional del Explorador.
+//! 
+//! El módulo se integra con el Explorador de Windows a través del submódulo [`shell`]
+//! para obtener el orden visual de los archivos tal como los ve el usuario.
+
 use crate::mime_type;
+use crate::shell::{compare_names_natural, os_strs_equal_ignore_case};
 
 use mime_type::MimeType;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::{fs, io};
-use std::os::windows::ffi::OsStrExt;
 use std::slice::Iter;
-use windows::{
-    Win32::{
-        Foundation::BOOL,
-        Globalization::{CSTR_EQUAL, CompareStringOrdinal},
-        System::Com::{
-            CLSCTX_ALL, CoCreateInstance, CoInitialize, CoTaskMemFree, CoUninitialize, IDispatch,
-            IServiceProvider,
-        },
-        System::SystemServices::SFGAO_FILESYSTEM,
-        UI::Shell::{
-            IFolderView, IShellBrowser, IShellItem, IShellItemArray, IShellView, IShellWindows,
-            SID_STopLevelBrowser, SIGDN_FILESYSPATH, SVGIO_ALLVIEW, ShellWindows, StrCmpLogicalW,
-        },
-    },
-    core::{Interface, PCWSTR, PWSTR, VARIANT},
-};
+use crate::shell::explorer::ShellFolder;
 
-struct ComApartment;
-
-struct TaskMemWide(PWSTR);
-
+/// Información sobre una carpeta del sistema de archivos.
+/// 
+/// Contiene la ruta original y un nombre canónico (minúsculas) para comparaciones
+/// case-insensitive en Windows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderInfo {
+    /// Nombre canónico de la carpeta (ruta absoluta en minúsculas).
     canonical_name: String,
-    path: PathBuf,
+    /// Ruta original de la carpeta.
+    path: ShellFolder,
 }
 
+/// Información sobre un archivo de imagen.
+/// 
+/// Incluye metadatos del archivo, tipo MIME esperado basado en la extensión,
+/// y referencia a la carpeta contenedora.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileInfo {
+    /// Nombre canónico del archivo (minúsculas).
     canonical_name: String,
+    /// Tipo MIME esperado basado en la extensión del archivo.
     expected_mime_type: String,
+    /// Tamaño del archivo en bytes.
     file_size: u64,
+    /// Información de la carpeta contenedora.
     folder: FolderInfo,
+    /// Nombre original del archivo (preserva mayúsculas/minúsculas).
     name: OsString,
 }
 
+/// Listado de archivos de imagen en una carpeta con orden opcional del Explorador.
+/// 
+/// Proporciona acceso a los archivos de imagen soportados en una carpeta,
+/// opcionalmente ordenados según la vista actual del Explorador de Windows.
 pub struct FolderListing {
+    /// Información de la carpeta.
     folder: FolderInfo,
-    // Lista de imágenes cargadas
-    // Lista de previsualizaciones
-    // Lista de datos sobre imágenes
-    // Lista de miniaturas
-    // Estado de cada imagen
+    /// Archivos de imagen encontrados en la carpeta.
     files: Vec<FileInfo>,
+    /// Indica si se usó el orden del Explorador de Windows.
     used_explorer_order: bool,
+    /// Índice del archivo actualmente seleccionado (si aplica).
     current_index: Option<usize>,
 }
 
-impl Drop for ComApartment {
-    fn drop(&mut self) {
-        unsafe {
-            CoUninitialize();
-        }
-    }
-}
-
-impl Drop for TaskMemWide {
-    fn drop(&mut self) {
-        unsafe {
-            CoTaskMemFree(Some(self.0.0.cast()));
-        }
-    }
-}
-
 impl FileInfo {
+    /// Crea un `FileInfo` desde una ruta de archivo.
+    /// 
+    /// Valida que la ruta apunte a un archivo existente y que tenga una extensión
+    /// de imagen soportada (.jpg, .jpeg, .jpe, .jfif, .png).
     pub fn from_path(path: &Path) -> io::Result<FileInfo> {
         let metadata = fs::metadata(path)?;
         if !metadata.is_file() {
@@ -90,21 +89,42 @@ impl FileInfo {
             .to_os_string();
         folder_info.get_file(&file_name)
     }
+
+    /// Obtiene el nombre canónico del archivo (minúsculas).
     pub fn canonical_name(&self) -> &str {
-        &self.canonical_name.as_ref()
+        self.canonical_name.as_ref()
     }
+
+    /// Obtiene el tipo MIME esperado basado en la extensión.
     pub fn expected_mime_type(&self) -> &str {
         self.expected_mime_type.as_ref()
     }
+
+    /// Obtiene la información de la carpeta contenedora.
     pub fn folder(&self) -> &FolderInfo {
         &self.folder
     }
+
+    /// Obtiene el nombre original del archivo.
     pub fn name(&self) -> &OsStr {
         &self.name
     }
+
+    /// Obtiene el tamaño del archivo en bytes.
     pub fn file_size(&self) -> u64 {
         self.file_size
     }
+
+    /// Ordena una lista de archivos según el orden del Explorador y/o orden natural.
+    /// 
+    /// # Argumentos
+    /// * `files` - Lista mutable de archivos a ordenar.
+    /// * `order` - Orden opcional desde el Explorador de Windows (nombres de archivo en orden visual).
+    /// * `selected_file` - Archivo opcional para encontrar su índice tras el ordenamiento.
+    /// 
+    /// # Retorna
+    /// Índice del `selected_file` en la lista ordenada, o 0 si no se proporciona,
+    /// o `None` si la lista está vacía.
     pub fn sort(
         files: &mut [FileInfo],
         order: Option<&[OsString]>,
@@ -127,7 +147,7 @@ impl FileInfo {
                 Some((None, Some(_))) => Ordering::Greater,
                 Some((None, None)) | None => Ordering::Equal,
             }
-                .then_with(|| compare_names(&left.name, &right.name))
+                .then_with(|| compare_names_natural(&left.name, &right.name))
         });
 
         if let Some(selected) = selected_file {
@@ -135,7 +155,7 @@ impl FileInfo {
                 .position(|item|
                     os_strs_equal_ignore_case(&item.name, &selected.name)
                 )
-        } else if files.len() > 0 {
+        } else if !files.is_empty() {
             Some(0)
         } else {
             None
@@ -144,6 +164,10 @@ impl FileInfo {
 }
 
 impl FolderInfo {
+    /// Crea un `FolderInfo` desde una ruta de carpeta.
+    /// 
+    /// Valida que la ruta exista y sea un directorio. Canonicaliza la ruta
+    /// y genera un nombre canónico en minúsculas para comparaciones case-insensitive.
     pub fn from_path(path: &Path) -> io::Result<FolderInfo> {
         let metadata = fs::metadata(path)?;
         // Comprueba que la ruta sea una carpeta
@@ -153,8 +177,11 @@ impl FolderInfo {
                 "la ruta no apunta a una carpeta",
             ));
         }
-        // Obtiene la ruta para buscar igualdades
-        let canonical_path = fs::canonicalize(path)?
+        // Obtiene la ruta canonicalizada para comparaciones
+        let canonical_path = fs::canonicalize(path)?;
+
+        // Convierte a string y valida que sea Unicode válido
+        let canonical_str = canonical_path
             .as_path()
             .to_str()
             .ok_or_else(|| {
@@ -164,14 +191,20 @@ impl FolderInfo {
                 )
             })?
             .to_lowercase();
+
         // Devuelve un nuevo objeto FolderInfo
         Ok(FolderInfo {
-            path: path.to_path_buf(),
-            canonical_name: canonical_path,
+            path: ShellFolder::new(path.to_path_buf()),
+            canonical_name: canonical_str,
         })
     }
+
+    /// Obtiene un `FileInfo` para un archivo dentro de esta carpeta.
+    /// 
+    /// Valida que el archivo exista y tenga una extensión de imagen soportada
+    /// (.jpg, .jpeg, .jpe, .jfif, .png).
     pub fn get_file(&self, file_name: &OsString) -> io::Result<FileInfo> {
-        let path_buf = self.path
+        let path_buf = self.path.value()
             .join(file_name);
         let path: &Path = path_buf.as_path();
         let metadata = fs::metadata(path)?;
@@ -204,116 +237,39 @@ impl FolderInfo {
             canonical_name,
         })
     }
+
+    /// Obtiene el nombre canónico de la carpeta (minúsculas).
     pub fn canonical_name(&self) -> &str {
         &self.canonical_name.as_ref()
     }
+
+    /// Obtiene la ruta original de la carpeta.
     pub fn path(&self) -> &Path {
-        &self.path
+        self.path.value()
     }
+
+    /// Obtiene el orden actual de archivos en el Explorador de Windows.
+    /// 
+    /// Consulta la vista activa del Explorador para obtener el orden visual
+    /// de los archivos en esta carpeta.
+    /// 
+    /// # Retorna
+    /// `Some(Vec<OsString>)` con los nombres en orden del Explorador,
+    /// o `None` si no se puede determinar (ej. carpeta no abierta en el Explorador).
     fn current_explorer_order(&self) -> Option<Vec<OsString>> {
-        match unsafe { CoInitialize(None).ok() } {
-            Ok(_) => (),
-            Err(_) => return None
-        };
-        let _apartment = ComApartment;
-        let expected_folder = match fs::canonicalize(self.path.as_path()) {
-            Ok(path) => path,
-            Err(_) => return None
-        };
-        let shell_windows: IShellWindows =
-            match unsafe { CoCreateInstance(&ShellWindows, None, CLSCTX_ALL) } {
-                Ok(shell_windows) => shell_windows,
-                Err(_) => return None
-            };
-        let window_count = match unsafe { shell_windows.Count() } {
-            Ok(count) => count,
-            Err(_) => return None
-        };
-        'outer: for index in 0..window_count {
-            let dispatch: IDispatch = match unsafe { shell_windows.Item(&VARIANT::from(index)) } {
-                Ok(dispatch) => dispatch,
-                Err(_) => continue 'outer,
-            };
-            let provider: IServiceProvider = match dispatch.cast() {
-                Ok(provider) => provider,
-                Err(_) => continue 'outer, /*
-                Err(error) if is_no_interface(&error) => continue,
-                Err(error) => return Err(error.into()),
-                */
-            };
-            let browser: IShellBrowser =
-                match unsafe { provider.QueryService(&SID_STopLevelBrowser) } {
-                    Ok(browser) => browser,
-                    Err(_) => continue 'outer, /*
-                    Err(error) if is_no_interface(&error) => continue,
-                    Err(error) => return Err(error.into()),
-                    */
-                };
-            let shell_view: IShellView = match unsafe { browser.QueryActiveShellView() } {
-                Ok(shell_view) => shell_view,
-                Err(_) => continue 'outer, /*
-                Err(error) if is_no_interface(&error) => continue,
-                Err(error) => return Err(error.into()),
-                */
-            };
-            let folder_view: IFolderView = match shell_view.cast() {
-                Ok(folder_view) => folder_view,
-                Err(_) => continue 'outer, /*
-                Err(error) if is_no_interface(&error) => continue,
-                Err(error) => return Err(error.into()),
-                */
-            };
-            let items: IShellItemArray = match unsafe { folder_view.Items(SVGIO_ALLVIEW) } {
-                Ok(items) => items,
-                Err(_) => continue 'outer,
-            };
-            let count: u32 = match unsafe { items.GetCount() } {
-                Ok(count) => count,
-                Err(_) => continue 'outer,
-            };
-            let mut item_paths = Vec::new();
-            for item_index in 0..count {
-                let item: IShellItem = match unsafe { items.GetItemAt(item_index) } {
-                    Ok(item) => item,
-                    Err(_) => continue 'outer,
-                };
-                let attributes = match unsafe { item.GetAttributes(SFGAO_FILESYSTEM) } {
-                    Ok(attributes) => attributes,
-                    Err(_) => continue 'outer,
-                };
-                if !attributes.contains(SFGAO_FILESYSTEM) {
-                    continue;
-                }
-                let item_path = match shell_item_path(&item) {
-                    Ok(item_path) => item_path,
-                    Err(_) => continue 'outer,
-                };
-                item_paths.push(item_path);
-            }
-
-            let Some(view_folder) = item_paths.iter().find_map(|path| path.parent()) else {
-                continue 'outer;
-            };
-            let same = match same_canonical_path(view_folder, &expected_folder) {
-                Ok(same) => same,
-                Err(_) => continue 'outer,
-            };
-            if !same {
-                continue 'outer;
-            }
-
-            return Some(
-                item_paths
-                    .into_iter()
-                    .filter_map(|path| path.file_name().map(OsStr::to_os_string))
-                    .collect()
-            );
-        }
-        None
+        self.path.get_explorer_order()
     }
+
+    /// Recopila todos los archivos de imagen soportados en la carpeta.
+    /// 
+    /// Escanea el directorio y filtra solo archivos con extensiones de imagen
+    /// soportadas, creando un `FileInfo` para cada uno.
+    /// 
+    /// # Retorna
+    /// Vector de `FileInfo` para cada imagen encontrada, o error de I/O.
     fn collect_supported_files(&self) -> io::Result<Vec<FileInfo>> {
         let mut files = Vec::new();
-        for entry in fs::read_dir(self.path.clone())? {
+        for entry in fs::read_dir(self.path.value())? {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(_) => continue,
@@ -343,6 +299,11 @@ impl FolderInfo {
 }
 
 impl FolderListing {
+    /// Crea un `FolderListing` desde un `FileInfo` existente.
+    /// 
+    /// Carga todos los archivos de imagen soportados en la misma carpeta,
+    /// los ordena según el orden del Explorador (si está disponible) y
+    /// establece el índice actual en el archivo proporcionado.
     pub fn from_file_info(file_info: &FileInfo) -> io::Result<FolderListing> {
         let mut files = file_info.folder.collect_supported_files()?;
         let explorer_order = file_info.folder.current_explorer_order();
@@ -354,6 +315,12 @@ impl FolderListing {
             current_index
         })
     }
+
+    /// Crea un `FolderListing` desde un `FolderInfo`.
+    /// 
+    /// Carga todos los archivos de imagen soportados en la carpeta,
+    /// los ordena según el orden del Explorador (si está disponible) y
+    /// establece el índice actual en el primer archivo (si hay alguno).
     pub fn from_folder_info(folder_info: FolderInfo) -> io::Result<FolderListing> {
         let mut files = folder_info.collect_supported_files()?;
         let explorer_order = folder_info.current_explorer_order();
@@ -365,6 +332,12 @@ impl FolderListing {
             current_index
         })
     }
+
+    /// Crea un `FolderListing` desde una ruta (archivo o carpeta).
+    /// 
+    /// Si la ruta es un archivo, crea el listado para su carpeta contenedora
+    /// y selecciona ese archivo. Si es una carpeta, crea el listado para
+    /// esa carpeta y selecciona el primer archivo.
     pub fn from_path(path: &Path) -> io::Result<FolderListing> {
         let metadata = fs::metadata(path)?;
         let folder_info: FolderInfo;
@@ -386,57 +359,26 @@ impl FolderListing {
             Err(io::Error::new(io::ErrorKind::InvalidInput, "ruta no válida"))
         }
     }
+
+    /// Obtiene el índice del archivo actualmente seleccionado.
     pub fn current_index(&self) -> &Option<usize> {
         &self.current_index
     }
+
+    /// Obtiene un iterador sobre los archivos de imagen en el listado.
     pub fn files(&self) -> Iter<'_, FileInfo> {
         self.files.iter()
     }
+
+    /// Obtiene la información de la carpeta.
     pub fn folder(&self) -> &FolderInfo {
         &self.folder
     }
+
+    /// Indica si se usó el orden del Explorador de Windows para ordenar.
     pub fn used_explorer_order(&self) -> bool {
         self.used_explorer_order
     }
-
-}
-
-fn compare_names(left: &OsStr, right: &OsStr) -> Ordering {
-    let left_wide = left.encode_wide().chain([0]).collect::<Vec<_>>();
-    let right_wide = right.encode_wide().chain([0]).collect::<Vec<_>>();
-    let result = unsafe { StrCmpLogicalW(PCWSTR(left_wide.as_ptr()), PCWSTR(right_wide.as_ptr())) };
-
-    match result.cmp(&0) {
-        Ordering::Equal => left.cmp(right),
-        ordering => ordering,
-    }
-}
-
-/*
-fn is_no_interface(error: &windows::core::Error) -> bool {
-    error.code().0 == 0x8000_4002_u32 as i32
-}
-*/
-
-fn os_strs_equal_ignore_case(left: &OsStr, right: &OsStr) -> bool {
-    let left_wide = left.encode_wide().collect::<Vec<_>>();
-    let right_wide = right.encode_wide().collect::<Vec<_>>();
-    unsafe { CompareStringOrdinal(&left_wide, &right_wide, BOOL(1)) == CSTR_EQUAL }
-}
-
-fn same_canonical_path(left: &Path, right: &Path) -> io::Result<bool> {
-    let left = fs::canonicalize(left)?;
-    let right = fs::canonicalize(right)?;
-    let left_wide = left.as_os_str().encode_wide().collect::<Vec<_>>();
-    let right_wide = right.as_os_str().encode_wide().collect::<Vec<_>>();
-
-    Ok(unsafe { CompareStringOrdinal(&left_wide, &right_wide, BOOL(1)) == CSTR_EQUAL })
-}
-
-fn shell_item_path(item: &IShellItem) -> windows::core::Result<PathBuf> {
-    let display_name = TaskMemWide(unsafe { item.GetDisplayName(SIGDN_FILESYSPATH)? });
-    let path = unsafe { display_name.0.to_string()? };
-    Ok(PathBuf::from(path))
 }
 
 #[cfg(test)]
@@ -444,7 +386,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
     use crate::files::{FileInfo, FolderInfo};
-
+    use crate::shell::explorer::ShellFolder;
 
     impl FileInfo {
         pub fn sample_file(folder: &str, name: &str) -> FileInfo {
@@ -472,7 +414,7 @@ mod tests {
         pub fn sample_folder(folder: &str) -> FolderInfo {
             FolderInfo {
                 canonical_name: folder.to_lowercase(),
-                path: PathBuf::from(folder),
+                path: ShellFolder::new(PathBuf::from(folder)),
             }
         }
     }

@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::path::{ Path, PathBuf };
+use std::path::{Path, PathBuf};
 
 pub struct MimeType {
     extensions: Vec<String>,

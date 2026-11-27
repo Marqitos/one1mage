@@ -1,6 +1,7 @@
 mod database;
 mod files;
 mod mime_type;
+mod shell;
 mod renderer;
 mod window;
 
@@ -94,7 +95,6 @@ impl Cache {
         // TODO: Extensión de imágenes en cache
     }
 }
-
 pub struct AppStoragePaths {
     app_data_dir: PathBuf,
 }
